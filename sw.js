@@ -1,4 +1,4 @@
-const CACHE = "lkb-v2";
+const CACHE = "lkb-v4";
 const SHELL = ["./", "index.html", "manifest.webmanifest", "icons/icon-192.png", "icons/icon-512.png", "icons/apple-touch-icon.png"];
 
 self.addEventListener("install", e => {
@@ -13,6 +13,7 @@ self.addEventListener("fetch", e => {
   const req = e.request;
   if (req.method !== "GET") return;
   const url = new URL(req.url);
+  if (url.pathname.includes("/api/")) return;
   if (url.origin === location.origin) {
     e.respondWith(
       fetch(req).then(res => {
@@ -21,7 +22,7 @@ self.addEventListener("fetch", e => {
         return res;
       }).catch(() => caches.match(req).then(r => r || caches.match("index.html")))
     );
-  } else if (url.hostname.endsWith("fonts.googleapis.com") || url.hostname.endsWith("fonts.gstatic.com")) {
+  } else if (url.hostname.endsWith("fonts.googleapis.com") || url.hostname.endsWith("fonts.gstatic.com") || (url.hostname === "www.gstatic.com" && url.pathname.startsWith("/firebasejs/"))) {
     e.respondWith(
       caches.match(req).then(hit => hit || fetch(req).then(res => {
         const copy = res.clone();

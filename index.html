@@ -172,6 +172,18 @@ footer button{background:transparent;border:0;color:var(--soft);font-weight:700;
 .match b{font-family:var(--display);font-weight:600;font-size:1.05rem}
 .match small{color:var(--soft);font-weight:700;overflow-wrap:anywhere}
 .muted{color:var(--soft);margin:0}
+.shelfpick{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px}
+@media (max-width:520px){.shelfpick{grid-template-columns:repeat(2,minmax(0,1fr))}}
+.account{margin-top:34px;display:flex;flex-wrap:wrap;gap:8px 12px;justify-content:center;align-items:center;text-align:center;background:var(--paper);border-radius:999px;padding:10px 18px;box-shadow:var(--shadow);font-size:.88rem;color:var(--soft)}
+.account b{color:var(--ink);overflow-wrap:anywhere}
+.account button{border:0;background:var(--berry);color:var(--berry-ink);border-radius:999px;padding:6px 14px;font-weight:800}
+.account + footer{margin-top:14px}
+.account{border-radius:22px;flex-direction:column}
+.account .phone{font-size:.85rem}
+.account .warn{color:var(--berry);font-weight:700}
+.codeform{display:flex;flex-wrap:wrap;gap:8px;justify-content:center;align-items:center}
+.codeform label{width:100%;font-weight:700;color:var(--ink)}
+.codeform input{width:8.5em;text-align:center;letter-spacing:.3em;font-weight:800;background:var(--bg);border:2px solid var(--line);border-radius:999px;padding:6px 12px}
 </style>
 </head>
 <body>
@@ -185,6 +197,7 @@ footer button{background:transparent;border:0;color:var(--soft);font-weight:700;
     <button class="btn" id="addBtn" type="button">+ New recipe</button>
   </header>
   <main id="view"></main>
+  <div class="account" id="account" hidden></div>
   <footer>
     <button type="button" id="exportBtn">Back up recipes</button>
     <span aria-hidden="true">·</span>
@@ -207,7 +220,7 @@ const EMOJI = ["🍓","🍒","🍑","🍉","🍋","🥞","🧇","🍳","🥐","�
 const TAPES = ["var(--butter)","var(--mint)","var(--sky)","var(--lilac)","var(--peach)"];
 const TINTS = [["Blush","var(--butter)"],["Rose","var(--mint)"],["Bubblegum","var(--sky)"],["Peony","var(--peach)"],["Orchid","var(--lilac)"],["Berry","var(--berry)"],["Cream","var(--paper)"]];
 function sticker(r){
-  const tint = (TINTS.find(t => t[1] === r.tint) || [0, catOf(r.category).tint])[1];
+  const tint = (TINTS.find(t => t[1] === r.tint) || [0, firstCat(r).tint])[1];
   const img = typeof r.image === "string" && r.image.startsWith("data:image/") ? `<img src="${esc(r.image)}" alt="">` : esc(r.emoji || "🍽️");
   return `<div class="sticker" aria-hidden="true" style="background:${tint}">${img}</div>`;
 }
@@ -239,6 +252,12 @@ document.addEventListener("change", async e => {
   catch{ const err = document.getElementById("err"); if(err) err.textContent = "That picture couldn't be opened. Try a JPG or PNG."; }
 });
 const catOf = id => CATS.find(c => c.id === (LEGACY[id] || id)) || CATS[2];
+function catsOf(r){
+  const ids = (Array.isArray(r.categories) && r.categories.length ? r.categories : [r.category]).map(id => catOf(id).id);
+  return CATS.filter(c => ids.includes(c.id));
+}
+const firstCat = r => catsOf(r)[0];
+const catPills = r => catsOf(r).map(c => `<span class="pill">${c.name}</span>`).join("");
 
 function loadRecipes(){
   try{ const raw = localStorage.getItem(KEY); if(raw === null) return []; const v = JSON.parse(raw); return Array.isArray(v) ? v.map(r => ({...r, category: catOf(r.category).id})) : []; }
@@ -279,6 +298,127 @@ function scaleLine(line, k){
   return {qty:fmtNum(n.v*k), rest:t.slice(n.len)};
 }
 
+const DEL_KEY = "lkb.deleted.v1", CODE_KEY = "lkb.synccode.v1", PANTRY_AT_KEY = "lkb.pantryAt.v1";
+const sync = {available: false, onPC: false, code: "", addresses: [], pcCode: "", status: "", busy: false, again: false, timer: null, dirty: 0, lastOk: 0};
+const lsGet = (k, d) => { try{ const v = localStorage.getItem(k); return v === null ? d : JSON.parse(v); }catch{ return d; } };
+const lsSet = (k, v) => { try{ localStorage.setItem(k, JSON.stringify(v)); }catch{} };
+const stamp = r => Number(r && (r.updatedAt || r.createdAt)) || 0;
+const upsert = (list, r) => list.some(x => x.id === r.id) ? list.map(x => x.id === r.id ? r : x) : [...list, r];
+function changed(){ sync.dirty++; queueSync(); }
+function tombstone(id){ const d = lsGet(DEL_KEY, {}); d[id] = Date.now(); lsSet(DEL_KEY, d); }
+function untomb(id){ const d = lsGet(DEL_KEY, {}); if(id in d){ delete d[id]; lsSet(DEL_KEY, d); } }
+const store = {
+  async put(r){
+    r = {...r, updatedAt: Date.now()};
+    const prev = state.recipes; state.recipes = upsert(prev, r);
+    if(!persist()){ state.recipes = prev; return false; }
+    untomb(r.id); changed(); return true;
+  },
+  async patch(id, fields){
+    const prev = state.recipes; state.recipes = prev.map(r => r.id === id ? {...r, ...fields, updatedAt: Date.now()} : r);
+    if(!persist()){ state.recipes = prev; return false; }
+    changed(); return true;
+  },
+  async remove(id){
+    const prev = state.recipes; state.recipes = prev.filter(r => r.id !== id);
+    if(!persist()){ state.recipes = prev; return false; }
+    tombstone(id); changed(); return true;
+  },
+  async putMany(list){
+    const prev = state.recipes, now = Date.now();
+    let next = prev;
+    for(const r of list){
+      const have = next.find(x => x.id === r.id);
+      if(!have) next = [...next, {...r, updatedAt: now}];
+      else if(stamp(r) > stamp(have)) next = upsert(next, r);
+    }
+    state.recipes = next;
+    if(!persist()){ state.recipes = prev; return false; }
+    list.forEach(r => untomb(r.id)); changed(); return true;
+  },
+  savePantry(){
+    lsSet(PANTRY_KEY, [...pantry]); lsSet(PANTRY_AT_KEY, Date.now()); changed();
+  }
+};
+function safeRender(){
+  const f = document.activeElement && document.activeElement.id;
+  if(state.editing || ["r-notes", "p-filter", "q", "sync-code"].includes(f)) return;
+  render();
+}
+function localBook(){
+  return {recipes: state.recipes, deleted: lsGet(DEL_KEY, {}), pantry: {items: [...pantry], updatedAt: lsGet(PANTRY_AT_KEY, 0)}};
+}
+function applyBook(b){
+  const del = b.deleted || {};
+  state.recipes = (b.recipes || []).filter(r => !((del[r.id] || 0) >= stamp(r)));
+  persist(); lsSet(DEL_KEY, del);
+  if(b.pantry && b.pantry.updatedAt > lsGet(PANTRY_AT_KEY, 0)){
+    pantry = new Set(b.pantry.items || []);
+    lsSet(PANTRY_KEY, [...pantry]); lsSet(PANTRY_AT_KEY, b.pantry.updatedAt);
+    document.querySelectorAll("[data-have]").forEach(c => c.checked = pantry.has(c.dataset.have));
+    renderMatches();
+  }
+  safeRender();
+}
+function queueSync(delay = 800){
+  if(!sync.available || !sync.code) return;
+  clearTimeout(sync.timer); sync.timer = setTimeout(runSync, delay);
+}
+async function runSync(){
+  if(!sync.available || !sync.code) return;
+  if(sync.busy){ sync.again = true; return; }
+  sync.busy = true; const startDirty = sync.dirty;
+  try{
+    const res = await fetch("api/sync", {method: "POST", headers: {"Content-Type": "application/json", "X-Sync-Code": sync.code}, body: JSON.stringify(localBook()), cache: "no-store"});
+    if(res.status === 401){ sync.code = ""; lsSet(CODE_KEY, ""); sync.status = "That sync code didn't match. Type the code shown on your PC."; return; }
+    if(!res.ok) throw new Error("status " + res.status);
+    const server = await res.json();
+    if(sync.dirty !== startDirty){ sync.again = true; return; }
+    applyBook(server);
+    sync.lastOk = Date.now(); sync.status = "";
+  }catch(x){
+    console.warn("[KitchenBook] sync failed", x);
+    sync.status = "Can't reach your PC right now. Changes are saved here and sync when you're back on home Wi-Fi.";
+  }finally{
+    sync.busy = false; renderAccount();
+    if(sync.again){ sync.again = false; queueSync(300); }
+  }
+}
+async function initSync(){
+  try{
+    const res = await fetch("api/ping", {cache: "no-store"});
+    if(!res.ok) return;
+    const j = await res.json();
+    if(j.app !== "little-kitchen-book") return;
+    sync.available = true; sync.addresses = j.addresses || [];
+    sync.onPC = !!j.code; sync.pcCode = j.code || "";
+    sync.code = j.code || lsGet(CODE_KEY, "");
+    renderAccount(); runSync();
+    setInterval(() => { if(document.visibilityState === "visible") queueSync(0); }, 20000);
+    document.addEventListener("visibilitychange", () => { if(document.visibilityState === "visible") queueSync(0); });
+    window.addEventListener("online", () => queueSync(0));
+  }catch{}
+}
+function renderAccount(){
+  const el = document.getElementById("account");
+  if(!sync.available){ el.hidden = true; return; }
+  el.hidden = false;
+  if(!sync.code){
+    el.innerHTML = `<form id="codeform" class="codeform"><label for="sync-code">Type the sync code shown on your PC</label><input id="sync-code" inputmode="numeric" autocomplete="off" maxlength="6" pattern="[0-9]{6}" placeholder="123456"><button type="submit">Connect</button></form>${sync.status ? `<span class="warn">${esc(sync.status)}</span>` : ""}`;
+    document.getElementById("codeform").addEventListener("submit", e => {
+      e.preventDefault();
+      const v = document.getElementById("sync-code").value.trim();
+      if(!/^\d{6}$/.test(v)){ sync.status = "The code is 6 numbers."; renderAccount(); return; }
+      sync.code = v; lsSet(CODE_KEY, v); sync.status = ""; document.activeElement.blur(); runSync();
+    });
+    return;
+  }
+  const when = sync.lastOk ? new Date(sync.lastOk).toLocaleTimeString([], {hour: "numeric", minute: "2-digit"}) : "";
+  const line = sync.status ? `<span class="warn">${esc(sync.status)}</span>` : `<span>🔄 Synced with your PC${when ? ` at ${esc(when)}` : ""}</span>`;
+  const phone = sync.onPC && sync.addresses.length ? `<span class="phone">On your phone, open <b>${esc(sync.addresses[0])}</b> and type code <b>${esc(sync.pcCode)}</b></span>` : "";
+  el.innerHTML = line + phone;
+}
+
 function render(){
   if(state.editing) return renderForm();
   if(state.pantry) return renderPantry();
@@ -289,7 +429,7 @@ function render(){
 function renderList(){
   const q = state.q.toLowerCase();
   const sorted = [...state.recipes].sort((a,b) => (a.createdAt||0) - (b.createdAt||0));
-  const list = sorted.filter(r => (state.filter === "all" || (state.filter === "fav" && r.fav) || r.category === state.filter) &&
+  const list = sorted.filter(r => (state.filter === "all" || (state.filter === "fav" && r.fav) || catsOf(r).some(c => c.id === state.filter)) &&
     (!q || (r.title + " " + (r.ingredients||[]).join(" ")).toLowerCase().includes(q)));
   const pills = [{id:"all",name:"Everything",tint:"var(--paper)"}, {id:"fav",name:"♥ Favourites",tint:"var(--peach)"}].map(c =>
     `<button class="tab" type="button" data-cat="${c.id}" aria-pressed="${state.filter===c.id}" style="background:${c.tint}">${c.name}</button>`).join("");
@@ -299,12 +439,12 @@ function renderList(){
   else if(!list.length && state.filter === "fav") body = `<div class="empty"><div class="pot">💗</div><h2>No favourites yet</h2><p>Tap the heart on any recipe to keep it here.</p></div>`;
   else if(!list.length) body = `<div class="empty"><div class="pot">🔍</div><h2>Nothing matches</h2><p>Try another word or pick Everything.</p></div>`;
   else body = `<div class="grid">${list.map((r,i) => {
-    const c = catOf(r.category);
+    const c = firstCat(r);
     return `<button class="card" type="button" data-open="${esc(r.id)}" style="--tint:${c.tint};--tape:${TAPES[i%TAPES.length]}">
       ${r.fav ? '<span class="fav-badge" aria-label="Favourite">♥</span>' : ""}
       ${sticker(r)}
       <h3>${esc(r.title)}</h3>
-      <div class="meta"><span class="pill">${c.name}</span>${r.minutes?`<span class="pill">${esc(r.minutes)} min</span>`:""}${r.serves?`<span class="pill">serves ${esc(r.serves)}</span>`:""}</div>
+      <div class="meta">${catPills(r)}${r.minutes?`<span class="pill">${esc(r.minutes)} min</span>`:""}${r.serves?`<span class="pill">serves ${esc(r.serves)}</span>`:""}</div>
       ${r.note?`<p class="note">${esc(r.note)}</p>`:""}
     </button>`;}).join("")}</div>`;
   $view.innerHTML = `<div class="toolbar"><div class="shelfbar" role="group" aria-label="Shelves">${shelves}</div><div class="tabs">${pills}</div><button class="btn whatcan" type="button" data-act="pantry">🧺 What can I make?</button>
@@ -316,7 +456,7 @@ function renderList(){
 }
 
 function renderRecipe(r){
-  const c = catOf(r.category);
+  const c = firstCat(r);
   const base = Math.max(1, +r.serves || 1);
   const cur = state.servings[r.id] ?? base, k = cur / base;
   const checked = state.checked[r.id] || (state.checked[r.id] = new Set());
@@ -326,7 +466,7 @@ function renderRecipe(r){
   $view.innerHTML = `<button class="btn ghost back" type="button" data-act="back">← All recipes</button>
   <article class="page" style="--tint:${c.tint}">
     <div class="page-top"><button class="heart" type="button" data-act="fav" aria-pressed="${!!r.fav}" aria-label="${r.fav ? "Remove from favourites" : "Add to favourites"}">${r.fav ? "♥" : "♡"}</button>${sticker(r)}
-      <div><h2>${esc(r.title)}</h2><div class="meta" style="margin-top:8px"><span class="pill">${c.name}</span>${r.minutes?`<span class="pill">${esc(r.minutes)} min</span>`:""}</div></div></div>
+      <div><h2>${esc(r.title)}</h2><div class="meta" style="margin-top:8px">${catPills(r)}${r.minutes?`<span class="pill">${esc(r.minutes)} min</span>`:""}</div></div></div>
     <div class="comments"><label for="r-notes">Notes</label><textarea id="r-notes" placeholder="How did it turn out? Anything to change next time?">${esc(r.comments || "")}</textarea><span class="saved" id="r-notes-state" role="status"></span></div>
     <div class="page-body">
       <section><h3>Ingredients <span class="serves"><button type="button" data-srv="-1" aria-label="Fewer servings">−</button><output>serves ${fmtNum(cur)}</output><button type="button" data-srv="1" aria-label="More servings">+</button></span></h3>
@@ -345,12 +485,12 @@ function renderForm(){
     <h2>${r.id ? "Edit recipe" : "New recipe"}</h2>
     <div class="field"><label for="f-title">Name</label><input id="f-title" required maxlength="80" value="${esc(r.title)}" placeholder="Strawberry milk pancakes"></div>
     <div class="field"><label for="f-comments">Notes <small>comments, changes, who loved it</small></label><textarea id="f-comments" style="min-height:84px" placeholder="Gerica says: extra strawberries!">${esc(r.comments || "")}</textarea></div>
+    <div class="field"><span class="lbl">Shelves <small>pick one or more</small></span><div class="shelfpick">${CATS.map(c => `<label class="have"><input type="checkbox" id="f-cat-${c.id}" data-shelf="${c.id}" ${catsOf(r).some(x => x.id === c.id) ? "checked" : ""}><span>${c.name}</span></label>`).join("")}</div></div>
     <div class="row">
-      <div class="field"><label for="f-cat">Shelf</label><select id="f-cat">${CATS.map(c=>`<option value="${c.id}" ${r.category===c.id?"selected":""}>${c.name}</option>`).join("")}</select></div>
       <div class="field"><label for="f-min">Minutes</label><input id="f-min" type="number" min="0" inputmode="numeric" value="${esc(r.minutes)}"></div>
       <div class="field"><label for="f-srv">Serves</label><input id="f-srv" type="number" min="1" inputmode="numeric" value="${esc(r.serves)}"></div>
     </div>
-    <div class="field"><span class="lbl">Sticker</span><div class="pick" id="f-pick">${pickHTML(r)}</div><input type="file" id="f-photo" accept="image/*" hidden><div class="choices">${emo}</div><span class="lbl2">Sticker color</span><div class="choices"><button type="button" class="swatch" data-tint="" aria-pressed="${!r.tint}" aria-label="Match the shelf" style="background:${catOf(r.category).tint}">auto</button>${TINTS.map(t => `<button type="button" class="swatch" data-tint="${t[1]}" aria-pressed="${r.tint===t[1]}" aria-label="${t[0]}" style="background:${t[1]}"></button>`).join("")}</div></div>
+    <div class="field"><span class="lbl">Sticker</span><div class="pick" id="f-pick">${pickHTML(r)}</div><input type="file" id="f-photo" accept="image/*" hidden><div class="choices">${emo}</div><span class="lbl2">Sticker color</span><div class="choices"><button type="button" class="swatch" data-tint="" aria-pressed="${!r.tint}" aria-label="Match the shelf" style="background:${firstCat(r).tint}">auto</button>${TINTS.map(t => `<button type="button" class="swatch" data-tint="${t[1]}" aria-pressed="${r.tint===t[1]}" aria-label="${t[0]}" style="background:${t[1]}"></button>`).join("")}</div></div>
     <div class="row">
       <div class="field"><label for="f-ing">Ingredients <small>one per line, amount first</small></label><textarea id="f-ing" placeholder="1 1/2 cups flour&#10;2 eggs&#10;pinch of salt">${esc((r.ingredients||[]).join("\n"))}</textarea></div>
       <div class="field"><label for="f-steps">Steps <small>one per line</small></label><textarea id="f-steps" placeholder="Whisk the dry things together.">${esc((r.steps||[]).join("\n"))}</textarea></div>
@@ -362,27 +502,22 @@ function renderForm(){
   document.getElementById("form").addEventListener("submit", save);
 }
 
-function save(e){
+async function save(e){
   e.preventDefault();
   const v = id => document.getElementById(id).value;
   const lines = s => s.split("\n").map(x => x.trim()).filter(Boolean);
   const ed = state.editing;
-  const data = {id: ed.id || newId(), title:v("f-title").trim(), category:v("f-cat"), minutes:+v("f-min")||0, serves:+v("f-srv")||0,
+  const shelves = [...document.querySelectorAll("[data-shelf]:checked")].map(c => c.dataset.shelf);
+  const data = {id: ed.id || newId(), title:v("f-title").trim(), categories:shelves, category:shelves[0], minutes:+v("f-min")||0, serves:+v("f-srv")||0,
     emoji:ed.emoji||"🍽️", image:ed.image||"", tint:ed.tint||"", fav:!!ed.fav, comments:v("f-comments").trim(), ingredients:lines(v("f-ing")), steps:lines(v("f-steps")), note:v("f-note").trim(),
     createdAt:ed.createdAt || Date.now()};
   if(!data.title){ document.getElementById("err").textContent = "Give the recipe a name first."; return; }
-  const prev = state.recipes;
-  state.recipes = ed.id ? prev.map(r => r.id === ed.id ? data : r) : [...prev, data];
-  if(!persist()){ state.recipes = prev; return; }
+  if(!shelves.length){ document.getElementById("err").textContent = "Pick at least one shelf."; return; }
+  if(!(await store.put(data))) return;
   state.open = data.id; state.editing = null; render(); scrollTo({top:0}); toast("Saved");
 }
 
-function savePatch(id, patch){
-  const prev = state.recipes;
-  state.recipes = prev.map(r => r.id === id ? {...r, ...patch} : r);
-  if(!persist()){ state.recipes = prev; return Promise.resolve(false); }
-  return Promise.resolve(true);
-}
+function savePatch(id, patch){ return store.patch(id, patch); }
 let notesTimer;
 $view.addEventListener("input", e => {
   if(e.target.id !== "r-notes") return;
@@ -407,9 +542,9 @@ function baseIngredient(line){
   if(words.length) words[words.length - 1] = singular(words[words.length - 1]);
   return words.join(" ").trim();
 }
-let pantry;
-try{ pantry = new Set(JSON.parse(localStorage.getItem(PANTRY_KEY)) || []); }catch{ pantry = new Set(); }
-function savePantry(){ try{ localStorage.setItem(PANTRY_KEY, JSON.stringify([...pantry])); }catch{} }
+function loadPantryLocal(){ try{ return new Set(JSON.parse(localStorage.getItem(PANTRY_KEY)) || []); }catch{ return new Set(); } }
+let pantry = loadPantryLocal();
+function savePantry(){ store.savePantry(); }
 function needsOf(r){ return [...new Set((r.ingredients || []).map(baseIngredient).filter(Boolean))]; }
 function renderPantry(){
   const all = [...new Set(state.recipes.flatMap(needsOf))].sort();
@@ -460,10 +595,8 @@ $view.addEventListener("click", e => {
   if(a === "edit"){ const r = state.recipes.find(x => x.id === state.open); state.editing = {...r, ingredients:[...(r.ingredients||[])], steps:[...(r.steps||[])]}; render(); scrollTo({top:0}); }
   if(a === "del"){
     if(!delArmed){ delArmed = true; t.textContent = "Tap again to delete for good"; setTimeout(() => { delArmed = false; if(t.isConnected) t.textContent = "Delete recipe"; }, 3500); return; }
-    delArmed = false; const prev = state.recipes;
-    state.recipes = prev.filter(r => r.id !== state.open);
-    if(!persist()){ state.recipes = prev; return; }
-    state.open = null; render(); toast("Recipe deleted");
+    delArmed = false;
+    store.remove(state.open).then(ok => { if(!ok) return; state.open = null; render(); toast("Recipe deleted"); });
   }
 });
 $view.addEventListener("change", e => {
@@ -471,7 +604,7 @@ $view.addEventListener("change", e => {
   const set = state.checked[state.open]; const i = +e.target.dataset.ing;
   e.target.checked ? set.add(i) : set.delete(i);
 });
-function openNew(){ state.pantry = false; state.editing = {title:"", category: CATS.some(c => c.id === state.filter) ? state.filter : "dinner", minutes:"", serves:2, emoji:"🍓", ingredients:[], steps:[], note:""}; state.open = null; render(); scrollTo({top:0}); }
+function openNew(){ state.pantry = false; state.editing = {title:"", categories: [CATS.some(c => c.id === state.filter) ? state.filter : "dinner"], minutes:"", serves:2, emoji:"🍓", ingredients:[], steps:[], note:""}; state.open = null; render(); scrollTo({top:0}); }
 document.getElementById("addBtn").addEventListener("click", openNew);
 
 document.getElementById("exportBtn").addEventListener("click", async () => {
@@ -491,15 +624,16 @@ document.getElementById("importFile").addEventListener("change", async e => {
   try{
     const v = JSON.parse(await f.text()); const incoming = Array.isArray(v) ? v : v.recipes;
     if(!Array.isArray(incoming)) throw 0;
-    const byId = new Map(state.recipes.map(r => [r.id, r]));
-    let n = 0; for(const r of incoming){ if(r && r.id && r.title){ byId.set(r.id, r); n++; } }
-    const prev = state.recipes; state.recipes = [...byId.values()];
-    if(!persist()){ state.recipes = prev; return; }
+    const good = incoming.filter(r => r && typeof r.id === "string" && r.id && !r.id.includes("/") && r.title);
+    const n = good.length;
+    if(!(await store.putMany(good))) return;
     state.open = null; state.editing = null; render(); toast(`Restored ${n} recipe${n===1?"":"s"}`);
   }catch{ toast("That file isn't a Kitchen Book backup."); }
 });
 
 render();
+renderAccount();
+initSync();
 if(navigator.storage && navigator.storage.persist) navigator.storage.persist().catch(() => {});
 if("serviceWorker" in navigator) window.addEventListener("load", () => navigator.serviceWorker.register("sw.js").catch(() => {}));
 </script>
